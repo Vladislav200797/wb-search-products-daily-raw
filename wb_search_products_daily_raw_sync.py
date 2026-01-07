@@ -64,34 +64,29 @@ def fetch_page_with_retry(
         "Content-Type": "application/json",
     }
 
-    last_err: str | None = None
+    last_err = None
 
     for attempt in range(1, max_retries + 1):
         try:
             r = session.post(WB_URL, headers=headers, json=payload, timeout=timeout_sec)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             last_err = f"Network/Timeout: {e}"
-            # backoff + jitter
             sleep_s = base_backoff_sec * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
             print(f"⚠️ {last_err}. Retry {attempt}/{max_retries} after {sleep_s:.1f}s", flush=True)
             time.sleep(sleep_s)
             continue
 
         if r.status_code >= 400:
-            # 429 / 5xx -> retry
             if is_retryable_http(r.status_code):
-                last_err = f"HTTP {r.status_code}: {r.text[:200]}"
-                # для 429 можно ждать дольше
+                last_err = f"HTTP {r.status_code}: {r.text[:300]}"
                 if r.status_code == 429:
                     sleep_s = max(30.0, base_backoff_sec * (2 ** (attempt - 1))) + random.uniform(0, 1.5)
                 else:
                     sleep_s = base_backoff_sec * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
-
                 print(f"⚠️ {last_err}. Retry {attempt}/{max_retries} after {sleep_s:.1f}s", flush=True)
                 time.sleep(sleep_s)
                 continue
 
-            # не retryable
             raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
 
         data = r.json()
@@ -152,27 +147,26 @@ def main():
     dsn = os.environ["SUPABASE_DSN"]
 
     position_cluster = os.getenv("WB_POSITION_CLUSTER", "all")
-    include_substituted = os.getenv("WB_INCLUDE_SUBSTITUTED", "true").lower() == "true"
+    include_substituted = os.getenv("WB_INCLUDE_SUBSTITUTED", "false").lower() == "true"
     include_search_texts = os.getenv("WB_INCLUDE_SEARCH_TEXTS", "true").lower() == "true"
     order_field = os.getenv("WB_ORDER_FIELD", "orders")
     order_mode = os.getenv("WB_ORDER_MODE", "desc")
 
-    days_back = int(os.getenv("DAYS_BACK", "2"))
+    days_back = int(os.getenv("DAYS_BACK", "7"))
 
-    # можно снизить limit (на случай если WB иногда тупит на больших лимитах)
     limit = int(os.getenv("WB_LIMIT", "500"))
+    sleep_sec = float(os.getenv("WB_SLEEP_SEC", "25"))
 
-    # лимит WB 3 req/min → пауза
-    sleep_sec = float(os.getenv("WB_SLEEP_SEC", "21"))
-
-    # ретраи на 504/timeout
     timeout_sec = int(os.getenv("WB_TIMEOUT_SEC", "90"))
     max_retries = int(os.getenv("WB_MAX_RETRIES", "6"))
     base_backoff_sec = float(os.getenv("WB_BACKOFF_SEC", "5"))
 
     today = msk_today()
     dates = [(today - dt.timedelta(days=i)) for i in range(1, days_back + 1)]
-    print(f"MSK today: {today} | Reload dates: {dates}", flush=True)
+
+    scope = f"includeSearchTexts={include_search_texts}, includeSubstitutedSKUs={include_substituted}"
+    print(f"MSK today: {today} | DAYS_BACK={days_back} | {scope}", flush=True)
+    print(f"Reload dates: {dates}", flush=True)
 
     session = requests.Session()
 
@@ -217,7 +211,7 @@ def main():
                 )
                 total_upserted += n
 
-                # ✅ Ключевое: если вернулось меньше limit — это последняя страница
+                # если меньше лимита — последняя страница
                 if len(products) < limit:
                     break
 
