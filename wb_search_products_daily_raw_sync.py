@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import random
 import datetime as dt
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Tuple
@@ -26,7 +27,12 @@ def safe_get(obj: Dict[str, Any], path: Tuple[str, ...], default=None):
     return cur
 
 
-def fetch_page(
+def is_retryable_http(code: int) -> bool:
+    return code in (429, 500, 502, 503, 504)
+
+
+def fetch_page_with_retry(
+    session: requests.Session,
     token: str,
     report_date: dt.date,
     offset: int,
@@ -36,7 +42,9 @@ def fetch_page(
     include_search_texts: bool,
     order_field: str,
     order_mode: str,
-    timeout_sec: int = 60,
+    timeout_sec: int,
+    max_retries: int,
+    base_backoff_sec: float,
 ) -> List[Dict[str, Any]]:
     past_date = report_date - dt.timedelta(days=1)
 
@@ -56,15 +64,41 @@ def fetch_page(
         "Content-Type": "application/json",
     }
 
-    r = requests.post(WB_URL, headers=headers, json=payload, timeout=timeout_sec)
-    if r.status_code == 429:
-        raise RuntimeError("HTTP 429 Too Many Requests")
-    if r.status_code >= 400:
-        raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
+    last_err: str | None = None
 
-    data = r.json()
-    products = safe_get(data, ("data", "products"), default=[])
-    return products if isinstance(products, list) else []
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = session.post(WB_URL, headers=headers, json=payload, timeout=timeout_sec)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_err = f"Network/Timeout: {e}"
+            # backoff + jitter
+            sleep_s = base_backoff_sec * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
+            print(f"⚠️ {last_err}. Retry {attempt}/{max_retries} after {sleep_s:.1f}s", flush=True)
+            time.sleep(sleep_s)
+            continue
+
+        if r.status_code >= 400:
+            # 429 / 5xx -> retry
+            if is_retryable_http(r.status_code):
+                last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+                # для 429 можно ждать дольше
+                if r.status_code == 429:
+                    sleep_s = max(30.0, base_backoff_sec * (2 ** (attempt - 1))) + random.uniform(0, 1.5)
+                else:
+                    sleep_s = base_backoff_sec * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
+
+                print(f"⚠️ {last_err}. Retry {attempt}/{max_retries} after {sleep_s:.1f}s", flush=True)
+                time.sleep(sleep_s)
+                continue
+
+            # не retryable
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
+
+        data = r.json()
+        products = safe_get(data, ("data", "products"), default=[])
+        return products if isinstance(products, list) else []
+
+    raise RuntimeError(f"Failed after {max_retries} retries. Last error: {last_err}")
 
 
 def upsert_raw_items(
@@ -123,41 +157,50 @@ def main():
     order_field = os.getenv("WB_ORDER_FIELD", "orders")
     order_mode = os.getenv("WB_ORDER_MODE", "desc")
 
-    days_back = int(os.getenv("DAYS_BACK", "2"))  # вчера+позавчера по умолчанию
-    limit = int(os.getenv("WB_LIMIT", "1000"))
-    sleep_sec = float(os.getenv("WB_SLEEP_SEC", "21"))  # 3 req/min => ~20 сек пауза
+    days_back = int(os.getenv("DAYS_BACK", "2"))
+
+    # можно снизить limit (на случай если WB иногда тупит на больших лимитах)
+    limit = int(os.getenv("WB_LIMIT", "500"))
+
+    # лимит WB 3 req/min → пауза
+    sleep_sec = float(os.getenv("WB_SLEEP_SEC", "21"))
+
+    # ретраи на 504/timeout
+    timeout_sec = int(os.getenv("WB_TIMEOUT_SEC", "90"))
+    max_retries = int(os.getenv("WB_MAX_RETRIES", "6"))
+    base_backoff_sec = float(os.getenv("WB_BACKOFF_SEC", "5"))
 
     today = msk_today()
     dates = [(today - dt.timedelta(days=i)) for i in range(1, days_back + 1)]
+    print(f"MSK today: {today} | Reload dates: {dates}", flush=True)
 
-    print(f"MSK today: {today} | Reload dates: {dates}")
+    session = requests.Session()
 
     with psycopg2.connect(dsn) as conn:
         for report_date in dates:
-            print(f"\n=== report_date={report_date} ===")
+            print(f"\n=== report_date={report_date} ===", flush=True)
+
             offset = 0
             total_upserted = 0
 
             while True:
-                print(f"Fetch offset={offset} limit={limit}")
-                try:
-                    products = fetch_page(
-                        token=token,
-                        report_date=report_date,
-                        offset=offset,
-                        limit=limit,
-                        position_cluster=position_cluster,
-                        include_substituted_skus=include_substituted,
-                        include_search_texts=include_search_texts,
-                        order_field=order_field,
-                        order_mode=order_mode,
-                    )
-                except RuntimeError as e:
-                    if "429" in str(e):
-                        print("Rate limit. Sleep 30s and retry...")
-                        time.sleep(30)
-                        continue
-                    raise
+                print(f"Fetch offset={offset} limit={limit}", flush=True)
+
+                products = fetch_page_with_retry(
+                    session=session,
+                    token=token,
+                    report_date=report_date,
+                    offset=offset,
+                    limit=limit,
+                    position_cluster=position_cluster,
+                    include_substituted_skus=include_substituted,
+                    include_search_texts=include_search_texts,
+                    order_field=order_field,
+                    order_mode=order_mode,
+                    timeout_sec=timeout_sec,
+                    max_retries=max_retries,
+                    base_backoff_sec=base_backoff_sec,
+                )
 
                 if not products:
                     break
@@ -174,10 +217,14 @@ def main():
                 )
                 total_upserted += n
 
+                # ✅ Ключевое: если вернулось меньше limit — это последняя страница
+                if len(products) < limit:
+                    break
+
                 offset += limit
                 time.sleep(sleep_sec)
 
-            print(f"Done report_date={report_date}. Upserted: {total_upserted}")
+            print(f"Done report_date={report_date}. Upserted: {total_upserted}", flush=True)
 
 
 if __name__ == "__main__":
