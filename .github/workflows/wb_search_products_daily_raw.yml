@@ -1,7 +1,9 @@
-name: WB Search Products Daily RAW (Backfill 30 days)
+name: WB Search Products Daily RAW (table_details)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"  # 04:00 UTC = 07:00 MSK
 
 concurrency:
   group: wb-search-products-daily-raw
@@ -10,6 +12,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,22 +27,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run backfill (30 days)
+      - name: Run sync (DAYS_BACK=7)
         env:
           WB_SA_TOKEN: ${{ secrets.WB_SA_TOKEN }}
           SUPABASE_DSN: ${{ secrets.SUPABASE_DSN }}
 
+          # Настройки выгрузки
           WB_POSITION_CLUSTER: "all"
           WB_INCLUDE_SUBSTITUTED: "true"
           WB_INCLUDE_SEARCH_TEXTS: "true"
           WB_ORDER_FIELD: "orders"
           WB_ORDER_MODE: "desc"
 
-          DAYS_BACK: "30"
+          # Перезаливка последних 7 дней (вчера..вчера-6) по МСК
+          DAYS_BACK: "7"
 
-          # ВАЖНО: снизили лимит страницы, добавили ретраи
+          # Лимиты WB + стабильность
           WB_LIMIT: "500"
-          WB_SLEEP_SEC: "21"
+          WB_SLEEP_SEC: "25"
           WB_TIMEOUT_SEC: "90"
           WB_MAX_RETRIES: "6"
           WB_BACKOFF_SEC: "5"
