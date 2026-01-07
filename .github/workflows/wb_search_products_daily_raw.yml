@@ -2,9 +2,6 @@ name: WB Search Products Daily RAW (Backfill 30 days)
 
 on:
   workflow_dispatch:
-  # На время бэкфилла schedule лучше выключить, чтобы не было параллельных запусков.
-  # schedule:
-  #   - cron: "0 4 * * *"  # 04:00 UTC = 07:00 MSK
 
 concurrency:
   group: wb-search-products-daily-raw
@@ -13,7 +10,6 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,18 +29,19 @@ jobs:
           WB_SA_TOKEN: ${{ secrets.WB_SA_TOKEN }}
           SUPABASE_DSN: ${{ secrets.SUPABASE_DSN }}
 
-          # Настройки выгрузки
           WB_POSITION_CLUSTER: "all"
           WB_INCLUDE_SUBSTITUTED: "true"
           WB_INCLUDE_SEARCH_TEXTS: "true"
           WB_ORDER_FIELD: "orders"
           WB_ORDER_MODE: "desc"
 
-          # БЭКФИЛЛ: 30 дней (вчера..вчера-29) по МСК
           DAYS_BACK: "30"
 
-          # Пагинация и лимиты WB (3 req/min)
-          WB_LIMIT: "1000"
+          # ВАЖНО: снизили лимит страницы, добавили ретраи
+          WB_LIMIT: "500"
           WB_SLEEP_SEC: "21"
+          WB_TIMEOUT_SEC: "90"
+          WB_MAX_RETRIES: "6"
+          WB_BACKOFF_SEC: "5"
         run: |
           python wb_search_products_daily_raw_sync.py
