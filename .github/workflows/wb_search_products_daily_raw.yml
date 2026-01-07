@@ -1,13 +1,19 @@
-name: WB Search Products Daily RAW (table_details)
+name: WB Search Products Daily RAW (Backfill 30 days)
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 4 * * *"  # 04:00 UTC = 07:00 MSK
+  # На время бэкфилла schedule лучше выключить, чтобы не было параллельных запусков.
+  # schedule:
+  #   - cron: "0 4 * * *"  # 04:00 UTC = 07:00 MSK
+
+concurrency:
+  group: wb-search-products-daily-raw
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,20 +28,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run sync
+      - name: Run backfill (30 days)
         env:
           WB_SA_TOKEN: ${{ secrets.WB_SA_TOKEN }}
           SUPABASE_DSN: ${{ secrets.SUPABASE_DSN }}
 
-          # настройки
+          # Настройки выгрузки
           WB_POSITION_CLUSTER: "all"
           WB_INCLUDE_SUBSTITUTED: "true"
           WB_INCLUDE_SEARCH_TEXTS: "true"
           WB_ORDER_FIELD: "orders"
           WB_ORDER_MODE: "desc"
 
-          # надёжность
-          DAYS_BACK: "2"
+          # БЭКФИЛЛ: 30 дней (вчера..вчера-29) по МСК
+          DAYS_BACK: "30"
+
+          # Пагинация и лимиты WB (3 req/min)
           WB_LIMIT: "1000"
           WB_SLEEP_SEC: "21"
         run: |
