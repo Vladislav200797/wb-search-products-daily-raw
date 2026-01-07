@@ -1,7 +1,9 @@
-name: WB Search Products Daily RAW (BACKFILL 30d, organic + promo)
+name: WB Search Products Daily RAW (DAILY 7d, organic + promo)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"  # 04:00 UTC = 07:00 MSK
 
 concurrency:
   group: wb-search-products-daily-raw
@@ -19,7 +21,7 @@ jobs:
       WB_ORDER_FIELD: "orders"
       WB_ORDER_MODE: "desc"
 
-      DAYS_BACK: "30"          # 👈 месяц
+      DAYS_BACK: "7"           # 👈 ежедневная перезаливка хвоста
       WB_LIMIT: "500"
       WB_SLEEP_SEC: "25"
       WB_TIMEOUT_SEC: "90"
